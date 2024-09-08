@@ -2,28 +2,33 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from http.cookiejar import CookieJar
-from typing import TYPE_CHECKING, Any, Generator, Generic, Mapping, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generator, Generic, Mapping, Sequence, TypeVar, cast
 from warnings import warn
 
+import httpx
 from anyio.from_thread import BlockingPortal, start_blocking_portal
 from httpx import Cookies, Request, Response
+from httpx._client import USE_CLIENT_DEFAULT, BaseClient, UseClientDefault
 
 from litestar import Litestar
 from litestar.connection import ASGIConnection
-from litestar.constants import SCOPE_STATE_COOKIES_KEY
 from litestar.datastructures import MutableScopeHeaders
 from litestar.enums import ScopeType
 from litestar.exceptions import (
     ImproperlyConfiguredException,
 )
 from litestar.types import AnyIOBackend, ASGIApp, HTTPResponseStartEvent
-from litestar.utils.scope import set_litestar_scope_state
+from litestar.utils.scope.state import ScopeState
 
 if TYPE_CHECKING:
-    from httpx._types import CookieTypes
+    from httpx._types import (
+        CookieTypes,
+        HeaderTypes,
+        QueryParamTypes,
+        TimeoutTypes,
+    )
 
     from litestar.middleware.session.base import BaseBackendConfig, BaseSessionBackend
-    from litestar.middleware.session.client_side import ClientSideSessionBackend
     from litestar.types.asgi_types import HTTPScope, Receive, Scope, Send
 
 T = TypeVar("T", bound=ASGIApp)
@@ -51,13 +56,13 @@ def fake_asgi_connection(app: ASGIApp, cookies: dict[str, str]) -> ASGIConnectio
         "app": app,  # type: ignore[typeddict-item]
         "state": {},
         "path_params": {},
-        "route_handler": None,  # type: ignore[typeddict-item]
+        "route_handler": None,
         "asgi": {"version": "3.0", "spec_version": "2.1"},
         "auth": None,
         "session": None,
         "user": None,
     }
-    set_litestar_scope_state(scope, SCOPE_STATE_COOKIES_KEY, cookies)
+    ScopeState.from_scope(scope).cookies = cookies
     return ASGIConnection[Any, Any, Any, Any](scope=scope)
 
 
@@ -156,20 +161,16 @@ class BaseTestClient(Generic[T]):
             ) as portal:
                 yield portal
 
-    @staticmethod
-    def _create_session_cookies(backend: ClientSideSessionBackend, data: dict[str, Any]) -> dict[str, str]:
-        encoded_data = backend.dump_data(data=data)
-        return {cookie.key: cast("str", cookie.value) for cookie in backend._create_session_cookies(encoded_data)}
-
     async def _set_session_data(self, data: dict[str, Any]) -> None:
         mutable_headers = MutableScopeHeaders()
+        connection = fake_asgi_connection(
+            app=self.app,
+            cookies=dict(self.cookies),  # type: ignore[arg-type]
+        )
+        session_id = self.session_backend.get_session_id(connection)
+        connection._connection_state.session_id = session_id  # pyright: ignore [reportGeneralTypeIssues]
         await self.session_backend.store_in_message(
-            scope_session=data,
-            message=fake_http_send_message(mutable_headers),
-            connection=fake_asgi_connection(
-                app=self.app,
-                cookies=dict(self.cookies),  # type: ignore[arg-type]
-            ),
+            scope_session=data, message=fake_http_send_message(mutable_headers), connection=connection
         )
         response = Response(200, request=Request("GET", self.base_url), headers=mutable_headers.headers)
 
@@ -183,4 +184,30 @@ class BaseTestClient(Generic[T]):
                 app=self.app,
                 cookies=dict(self.cookies),  # type: ignore[arg-type]
             ),
+        )
+
+    def _prepare_ws_connect_request(  # type: ignore[misc]
+        self: BaseClient,  # pyright: ignore
+        url: str,
+        subprotocols: Sequence[str] | None = None,
+        params: QueryParamTypes | None = None,
+        headers: HeaderTypes | None = None,
+        cookies: CookieTypes | None = None,
+        timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT,
+        extensions: Mapping[str, Any] | None = None,
+    ) -> httpx.Request:
+        default_headers: dict[str, str] = {}
+        default_headers.setdefault("connection", "upgrade")
+        default_headers.setdefault("sec-websocket-key", "testserver==")
+        default_headers.setdefault("sec-websocket-version", "13")
+        if subprotocols is not None:
+            default_headers.setdefault("sec-websocket-protocol", ", ".join(subprotocols))
+        return self.build_request(
+            "GET",
+            self.base_url.copy_with(scheme="ws").join(url),
+            headers={**dict(headers or {}), **default_headers},  # type: ignore[misc]
+            params=params,
+            cookies=cookies,
+            extensions=None if extensions is None else dict(extensions),
+            timeout=timeout,
         )

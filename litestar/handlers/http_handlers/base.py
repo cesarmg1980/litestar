@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import TYPE_CHECKING, AnyStr, Mapping, TypedDict, cast
+from typing import TYPE_CHECKING, AnyStr, Mapping, Sequence, TypedDict, cast
 
 from litestar._layers.utils import narrow_response_cookies, narrow_response_headers
+from litestar.connection import Request
 from litestar.datastructures.cookie import Cookie
 from litestar.datastructures.response_header import ResponseHeader
 from litestar.enums import HttpMethod, MediaType
@@ -17,6 +18,7 @@ from litestar.handlers.http_handlers._utils import (
     create_generic_asgi_response_handler,
     create_response_handler,
     get_default_status_code,
+    is_empty_response_annotation,
     normalize_http_method,
 )
 from litestar.openapi.spec import Operation
@@ -38,26 +40,24 @@ from litestar.types import (
     Middleware,
     ResponseCookies,
     ResponseHeaders,
-    ResponseType,
     TypeEncodersMap,
 )
-from litestar.types.builtin_types import NoneType
 from litestar.utils import ensure_async_callable
 from litestar.utils.predicates import is_async_callable
 from litestar.utils.warnings import warn_implicit_sync_to_thread, warn_sync_to_thread_with_async_callable
 
 if TYPE_CHECKING:
-    from typing import Any, Awaitable, Callable, Sequence
+    from typing import Any, Awaitable, Callable
 
     from litestar.app import Litestar
     from litestar.background_tasks import BackgroundTask, BackgroundTasks
     from litestar.config.response_cache import CACHE_FOREVER
-    from litestar.connection import Request
     from litestar.datastructures import CacheControlHeader, ETag
     from litestar.dto import AbstractDTO
     from litestar.openapi.datastructures import ResponseSpec
     from litestar.openapi.spec import SecurityRequirement
     from litestar.types.callable_types import AsyncAnyCallable, OperationIDCreator
+    from litestar.types.composite_types import TypeDecodersSequence
 
 __all__ = ("HTTPRouteHandler", "route")
 
@@ -78,6 +78,10 @@ class HTTPRouteHandler(BaseRouteHandler):
         "_resolved_before_request",
         "_response_handler_mapping",
         "_resolved_include_in_schema",
+        "_resolved_response_class",
+        "_resolved_request_class",
+        "_resolved_tags",
+        "_resolved_security",
         "after_request",
         "after_response",
         "background",
@@ -97,6 +101,7 @@ class HTTPRouteHandler(BaseRouteHandler):
         "operation_class",
         "operation_id",
         "raises",
+        "request_class",
         "response_class",
         "response_cookies",
         "response_description",
@@ -133,7 +138,8 @@ class HTTPRouteHandler(BaseRouteHandler):
         middleware: Sequence[Middleware] | None = None,
         name: str | None = None,
         opt: Mapping[str, Any] | None = None,
-        response_class: ResponseType | None = None,
+        request_class: type[Request] | None = None,
+        response_class: type[Response] | None = None,
         response_cookies: ResponseCookies | None = None,
         response_headers: ResponseHeaders | None = None,
         return_dto: type[AbstractDTO] | None | EmptyType = Empty,
@@ -154,6 +160,7 @@ class HTTPRouteHandler(BaseRouteHandler):
         security: Sequence[SecurityRequirement] | None = None,
         summary: str | None = None,
         tags: Sequence[str] | None = None,
+        type_decoders: TypeDecodersSequence | None = None,
         type_encoders: TypeEncodersMap | None = None,
         **kwargs: Any,
     ) -> None:
@@ -195,6 +202,8 @@ class HTTPRouteHandler(BaseRouteHandler):
             opt: A string keyed mapping of arbitrary values that can be accessed in :class:`Guards <.types.Guard>` or
                 wherever you have access to :class:`Request <.connection.Request>` or
                 :class:`ASGI Scope <.types.Scope>`.
+            request_class: A custom subclass of :class:`Request <.connection.Request>` to be used as route handler's
+                default request.
             response_class: A custom subclass of :class:`Response <.response.Response>` to be used as route handler's
                 default response.
             response_cookies: A sequence of :class:`Cookie <.datastructures.Cookie>` instances.
@@ -205,8 +214,9 @@ class HTTPRouteHandler(BaseRouteHandler):
             return_dto: :class:`AbstractDTO <.dto.base_dto.AbstractDTO>` to use for serializing
                 outbound response data.
             signature_namespace: A mapping of names to types for use in forward reference resolution during signature modelling.
-            status_code: An http status code for the response. Defaults to ``200`` for mixed method or ``GET``, ``PUT`` and
-                ``PATCH``, ``201`` for ``POST`` and ``204`` for ``DELETE``.
+            status_code: An http status code for the response. Defaults to ``200`` for ``GET``, ``PUT`` and ``PATCH``,
+                ``201`` for ``POST`` and ``204`` for ``DELETE``. For mixed method requests it will check for ``POST`` and ``DELETE`` first
+                then defaults to ``200``.
             sync_to_thread: A boolean dictating whether the handler function will be executed in a worker thread or the
                 main event loop. This has an effect only for sync handler functions. See using sync handler functions.
             content_encoding: A string describing the encoding of the content, e.g. ``"base64"``.
@@ -223,6 +233,7 @@ class HTTPRouteHandler(BaseRouteHandler):
             security: A sequence of dictionaries that contain information about which security scheme can be used on the endpoint.
             summary: Text used for the route's schema summary section.
             tags: A sequence of string tags that will be appended to the OpenAPI schema.
+            type_decoders: A sequence of tuples, each composed of a predicate testing for type identity and a msgspec hook for deserialization.
             type_encoders: A mapping of types to callables that transform them into types supported for serialization.
             **kwargs: Any additional kwarg - will be set in the opt dictionary.
         """
@@ -243,6 +254,7 @@ class HTTPRouteHandler(BaseRouteHandler):
             opt=opt,
             return_dto=return_dto,
             signature_namespace=signature_namespace,
+            type_decoders=type_decoders,
             type_encoders=type_encoders,
             **kwargs,
         )
@@ -256,6 +268,7 @@ class HTTPRouteHandler(BaseRouteHandler):
         self.cache_key_builder = cache_key_builder
         self.etag = etag
         self.media_type: MediaType | str = media_type or ""
+        self.request_class = request_class
         self.response_class = response_class
         self.response_cookies: Sequence[Cookie] | None = narrow_response_cookies(response_cookies)
         self.response_headers: Sequence[ResponseHeader] | None = narrow_response_headers(response_headers)
@@ -280,6 +293,10 @@ class HTTPRouteHandler(BaseRouteHandler):
         self._resolved_before_request: AsyncAnyCallable | None | EmptyType = Empty
         self._response_handler_mapping: ResponseHandlerMap = {"default_handler": Empty, "response_type_handler": Empty}
         self._resolved_include_in_schema: bool | EmptyType = Empty
+        self._resolved_response_class: type[Response] | EmptyType = Empty
+        self._resolved_request_class: type[Request] | EmptyType = Empty
+        self._resolved_security: list[SecurityRequirement] | EmptyType = Empty
+        self._resolved_tags: list[str] | EmptyType = Empty
 
     def __call__(self, fn: AnyCallable) -> HTTPRouteHandler:
         """Replace a function with itself."""
@@ -292,6 +309,23 @@ class HTTPRouteHandler(BaseRouteHandler):
         super().__call__(fn)
         return self
 
+    def resolve_request_class(self) -> type[Request]:
+        """Return the closest custom Request class in the owner graph or the default Request class.
+
+        This method is memoized so the computation occurs only once.
+
+        Returns:
+            The default :class:`Request <.connection.Request>` class for the route handler.
+        """
+
+        if self._resolved_request_class is Empty:
+            self._resolved_request_class = next(
+                (layer.request_class for layer in reversed(self.ownership_layers) if layer.request_class is not None),
+                Request,
+            )
+
+        return cast("type[Request]", self._resolved_request_class)
+
     def resolve_response_class(self) -> type[Response]:
         """Return the closest custom Response class in the owner graph or the default Response class.
 
@@ -300,14 +334,13 @@ class HTTPRouteHandler(BaseRouteHandler):
         Returns:
             The default :class:`Response <.response.Response>` class for the route handler.
         """
-        return next(
-            (
-                layer.response_class
-                for layer in list(reversed(self.ownership_layers))
-                if layer.response_class is not None
-            ),
-            Response,
-        )
+        if self._resolved_response_class is Empty:
+            self._resolved_response_class = next(
+                (layer.response_class for layer in reversed(self.ownership_layers) if layer.response_class is not None),
+                Response,
+            )
+
+        return cast("type[Response]", self._resolved_response_class)
 
     def resolve_response_headers(self) -> frozenset[ResponseHeader]:
         """Return all header parameters in the scope of the handler function.
@@ -406,6 +439,40 @@ class HTTPRouteHandler(BaseRouteHandler):
 
         return self._resolved_include_in_schema
 
+    def resolve_security(self) -> list[SecurityRequirement]:
+        """Resolve the security property by starting from the route handler and moving up.
+
+        Security requirements are additive, so the security requirements of the route handler are the sum of all
+        security requirements of the ownership layers.
+
+        Returns:
+            list[SecurityRequirement]: The resolved security property.
+        """
+        if self._resolved_security is Empty:
+            self._resolved_security = []
+            for layer in self.ownership_layers:
+                if isinstance(layer.security, Sequence):
+                    self._resolved_security.extend(layer.security)
+
+        return self._resolved_security
+
+    def resolve_tags(self) -> list[str]:
+        """Resolve the tags property by starting from the route handler and moving up.
+
+        Tags are additive, so the tags of the route handler are the sum of all tags of the ownership layers.
+
+        Returns:
+            list[str]: A sorted list of unique tags.
+        """
+        if self._resolved_tags is Empty:
+            tag_set = set()
+            for layer in self.ownership_layers:
+                for tag in layer.tags or []:
+                    tag_set.add(tag)
+            self._resolved_tags = sorted(tag_set)
+
+        return self._resolved_tags
+
     def get_response_handler(self, is_response_type_data: bool = False) -> Callable[[Any], Awaitable[ASGIApp]]:
         """Resolve the response_handler function for the route handler.
 
@@ -488,7 +555,7 @@ class HTTPRouteHandler(BaseRouteHandler):
             data = return_dto_type(request).data_to_encodable_type(data)
 
         response_handler = self.get_response_handler(is_response_type_data=isinstance(data, Response))
-        return await response_handler(app=app, data=data, request=request)  # type: ignore
+        return await response_handler(app=app, data=data, request=request)  # type: ignore[call-arg]
 
     def on_registration(self, app: Litestar) -> None:
         super().on_registration(app)
@@ -508,13 +575,13 @@ class HTTPRouteHandler(BaseRouteHandler):
 
         if return_type.annotation is Empty:
             raise ImproperlyConfiguredException(
-                "A return value of a route handler function should be type annotated. "
+                f"A return value of a route handler function {self} should be type annotated. "
                 "If your function doesn't return a value, annotate it as returning 'None'."
             )
 
         if (
             self.status_code < 200 or self.status_code in {HTTP_204_NO_CONTENT, HTTP_304_NOT_MODIFIED}
-        ) and not return_type.is_subclass_of(NoneType):
+        ) and not is_empty_response_annotation(return_type):
             raise ImproperlyConfiguredException(
                 "A status code 204, 304 or in the range below 200 does not support a response body. "
                 "If the function should return a value, change the route handler status code to an appropriate value.",

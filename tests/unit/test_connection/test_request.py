@@ -3,6 +3,7 @@
 https://github.com/encode/starlette/blob/master/tests/test_requests.py. And are meant to ensure our compatibility with
 their API.
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Callable, Dict, Generator
@@ -10,10 +11,15 @@ from unittest.mock import patch
 
 import pytest
 
-from litestar import MediaType, Request, asgi, get
+from litestar import MediaType, Request, asgi, get, post
 from litestar.connection.base import empty_send
 from litestar.datastructures import Address, Cookie
-from litestar.exceptions import InternalServerException, SerializationException
+from litestar.exceptions import (
+    InternalServerException,
+    LitestarException,
+    LitestarWarning,
+    SerializationException,
+)
 from litestar.middleware import MiddlewareProtocol
 from litestar.response.base import ASGIResponse
 from litestar.serialization import encode_json, encode_msgpack
@@ -135,7 +141,7 @@ def test_custom_request_class() -> None:
     class MyRequest(Request):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
-            self.scope["called"] = True  # type: ignore
+            self.scope["called"] = True  # type: ignore[typeddict-unknown-key]
 
     @get("/", signature_types=[MyRequest])
     def handler(request: MyRequest) -> None:
@@ -276,6 +282,24 @@ def test_request_form_urlencoded() -> None:
     assert response.json() == {"form": {"abc": "123 @"}}
 
 
+def test_request_form_urlencoded_multi_keys() -> None:
+    @post("/")
+    async def handler(request: Request) -> Any:
+        return (await request.form()).getall("foo")
+
+    with create_test_client(handler) as client:
+        assert client.post("/", data={"foo": ["1", "2"]}).json() == ["1", "2"]
+
+
+def test_request_form_multipart_multi_keys() -> None:
+    @post("/")
+    async def handler(request: Request) -> int:
+        return len((await request.form()).getall("foo"))
+
+    with create_test_client(handler) as client:
+        assert client.post("/", data={"foo": "1"}, files={"foo": b"a"}).json() == 2
+
+
 def test_request_body_then_stream() -> None:
     async def app(scope: Any, receive: Receive, send: Send) -> None:
         request = Request[Any, Any, Any](scope, receive)
@@ -377,7 +401,7 @@ def test_request_state() -> None:
     def handler(request: Request[Any, Any, Any]) -> dict[Any, Any]:
         request.state.test = 1
         assert request.state.test == 1
-        return request.state.dict()  # type: ignore
+        return request.state.dict()  # type: ignore[no-any-return]
 
     with create_test_client(handler) as client:
         response = client.get("/")
@@ -426,7 +450,7 @@ def test_chunked_encoding() -> None:
 def test_request_send_push_promise() -> None:
     async def app(scope: Scope, receive: Receive, send: Send) -> None:
         # the server is push-enabled
-        scope["extensions"]["http.response.push"] = {}  # type: ignore
+        scope["extensions"]["http.response.push"] = {}  # type: ignore[index]
 
         request = Request[Any, Any, Any](scope, receive, send)
         await request.send_push_promise("/style.css")
@@ -447,7 +471,9 @@ def test_request_send_push_promise_without_push_extension() -> None:
 
     async def app(scope: Scope, receive: Receive, send: Send) -> None:
         request = Request[Any, Any, Any](scope)
-        await request.send_push_promise("/style.css")
+
+        with pytest.warns(LitestarWarning, match="Attempted to send a push promise"):
+            await request.send_push_promise("/style.css")
 
         response = ASGIResponse(body=encode_json({"json": "OK"}))
         await response(scope, receive, send)
@@ -455,6 +481,24 @@ def test_request_send_push_promise_without_push_extension() -> None:
     client = TestClient(app)
     response = client.get("/")
     assert response.json() == {"json": "OK"}
+
+
+def test_request_send_push_promise_without_push_extension_raises() -> None:
+    """If server does not support the `http.response.push` extension,
+
+    .send_push_promise() does nothing.
+    """
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        request = Request[Any, Any, Any](scope)
+
+        with pytest.raises(LitestarException, match="Attempted to send a push promise"):
+            await request.send_push_promise("/style.css", raise_if_unavailable=True)
+
+        response = ASGIResponse(body=encode_json({"json": "OK"}))
+        await response(scope, receive, send)
+
+    TestClient(app).get("/")
 
 
 def test_request_send_push_promise_without_setting_send() -> None:
@@ -465,7 +509,7 @@ def test_request_send_push_promise_without_setting_send() -> None:
 
     async def app(scope: Scope, receive: Receive, send: Send) -> None:
         # the server is push-enabled
-        scope["extensions"]["http.response.push"] = {}  # type: ignore
+        scope["extensions"]["http.response.push"] = {}  # type: ignore[index]
 
         data = "OK"
         request = Request[Any, Any, Any](scope)

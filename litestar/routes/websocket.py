@@ -54,10 +54,13 @@ class WebSocketRoute(BaseRoute):
         Returns:
             None
         """
-        websocket: WebSocket[Any, Any, Any] = scope["app"].websocket_class(scope=scope, receive=receive, send=send)
 
         if not self.handler_parameter_model:  # pragma: no cover
             raise ImproperlyConfiguredException("handler parameter model not defined")
+
+        websocket: WebSocket[Any, Any, Any] = self.route_handler.resolve_websocket_class()(
+            scope=scope, receive=receive, send=send
+        )
 
         if self.route_handler.resolve_guards():
             await self.route_handler.authorize_connection(connection=websocket)
@@ -72,7 +75,7 @@ class WebSocketRoute(BaseRoute):
                 cleanup_group = await self.handler_parameter_model.resolve_dependencies(websocket, parsed_kwargs)
 
             parsed_kwargs = self.route_handler.signature_model.parse_values_from_connection_kwargs(
-                connection=websocket, **parsed_kwargs
+                connection=websocket, kwargs=parsed_kwargs
             )
 
         if cleanup_group:

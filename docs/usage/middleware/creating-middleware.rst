@@ -40,11 +40,9 @@ follows:
 
 
    class MiddlewareProtocol(Protocol):
-       def __init__(self, app: ASGIApp, **kwargs: Any) -> None:
-           ...
+       def __init__(self, app: ASGIApp, **kwargs: Any) -> None: ...
 
-       async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-           ...
+       async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None: ...
 
 The ``__init__`` method receives and sets "app". *It's important to understand* that app is not an instance of Litestar in
 this case, but rather the next middleware in the stack, which is also an ASGI app.
@@ -115,9 +113,8 @@ explore another example - redirecting the request to a different url from a midd
            else:
                await self.app(scope, receive, send)
 
-As you can see in the above, given some condition (request.session being None) we create a
-:class:`ASGIRedirectResponse <litestar.response.ASGIRedirectResponse>` and then await it. Otherwise, we await ``self.app``
-
+As you can see in the above, given some condition (``request.session`` being None) we create a
+:class:`ASGIRedirectResponse <litestar.response.redirect.ASGIRedirectResponse>` and then await it. Otherwise, we await ``self.app``
 
 Modifying ASGI Requests and Responses using the MiddlewareProtocol
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -216,6 +213,10 @@ Thus, in the following example, the middleware will only run against the route h
 .. literalinclude:: /examples/middleware/base.py
     :language: python
 
+.. danger::
+
+    Using ``/`` as an exclude pattern, will disable this middleware for all routes,
+    since, as a regex, it matches *every* path
 
 
 Using DefineMiddleware to pass arguments

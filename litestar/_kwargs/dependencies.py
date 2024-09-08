@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from inspect import isasyncgen, isgenerator
 from typing import TYPE_CHECKING, Any
 
 from litestar.utils.compat import async_next
@@ -59,16 +58,16 @@ async def resolve_dependency(
     """
     signature_model = dependency.provide.signature_model
     dependency_kwargs = (
-        signature_model.parse_values_from_connection_kwargs(connection=connection, **kwargs)
+        signature_model.parse_values_from_connection_kwargs(connection=connection, kwargs=kwargs)
         if signature_model._fields
         else {}
     )
     value = await dependency.provide(**dependency_kwargs)
 
-    if isgenerator(value):
+    if dependency.provide.has_sync_generator_dependency:
         cleanup_group.add(value)
         value = next(value)
-    elif isasyncgen(value):
+    elif dependency.provide.has_async_generator_dependency:
         cleanup_group.add(value)
         value = await async_next(value)
 

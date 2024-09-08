@@ -2,6 +2,7 @@
 Some tests in this file were adapted from: https://github.com/encode/starlette/blob/master/tests/test_websockets.py And
 were meant to ensure our compatibility with their API.
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Literal
@@ -71,7 +72,7 @@ async def test_custom_request_class() -> None:
     class MyWebSocket(WebSocket[Any, Any, Any]):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
-            self.scope["called"] = True  # type: ignore
+            self.scope["called"] = True  # type: ignore[typeddict-unknown-key]
 
     @websocket("/", signature_types=[MyWebSocket])
     async def handler(socket: MyWebSocket) -> None:
@@ -91,7 +92,18 @@ def test_websocket_url() -> None:
         await socket.close()
 
     with create_test_client(handler).websocket_connect("/123?a=abc") as ws:
-        assert ws.receive_json() == {"url": "ws://testserver/123?a=abc"}
+        assert ws.receive_json() == {"url": "ws://testserver.local/123?a=abc"}
+
+
+def test_websocket_url_respects_custom_base_url() -> None:
+    @websocket("/123")
+    async def handler(socket: WebSocket) -> None:
+        await socket.accept()
+        await socket.send_json({"url": str(socket.url)})
+        await socket.close()
+
+    with create_test_client(handler, base_url="http://example.org").websocket_connect("/123?a=abc") as ws:
+        assert ws.receive_json() == {"url": "ws://example.org/123?a=abc"}
 
 
 def test_websocket_binary_json() -> None:
@@ -132,7 +144,7 @@ def test_websocket_headers() -> None:
             "accept": "*/*",
             "accept-encoding": "gzip, deflate, br",
             "connection": "upgrade",
-            "host": "testserver",
+            "host": "testserver.local",
             "user-agent": "testclient",
             "sec-websocket-key": "testserver==",
             "sec-websocket-version": "13",

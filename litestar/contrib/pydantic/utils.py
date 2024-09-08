@@ -3,10 +3,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from typing_extensions import get_type_hints
+from typing_extensions import Annotated, get_type_hints
 
+from litestar.params import KwargDefinition
 from litestar.types import Empty
-from litestar.utils import is_class_and_subclass
+from litestar.typing import FieldDefinition
+from litestar.utils import deprecated, is_class_and_subclass
 from litestar.utils.predicates import is_generic
 from litestar.utils.typing import (
     _substitute_typevars,
@@ -39,6 +41,8 @@ except ImportError:
 
 
 if TYPE_CHECKING:
+    from types import ModuleType
+
     from typing_extensions import TypeGuard
 
 
@@ -127,24 +131,32 @@ def pydantic_get_type_hints_with_generics_resolved(
     globalns: dict[str, Any] | None = None,
     localns: dict[str, Any] | None = None,
     include_extras: bool = False,
+    model_annotations: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if pydantic_v2 is Empty or (pydantic_v1 is not Empty and is_class_and_subclass(annotation, pydantic_v1.BaseModel)):
-        return get_type_hints_with_generics_resolved(annotation)
+        return get_type_hints_with_generics_resolved(annotation, type_hints=model_annotations)
 
     origin = pydantic_unwrap_and_get_origin(annotation)
     if origin is None:
-        type_hints = get_type_hints(annotation, globalns=globalns, localns=localns, include_extras=include_extras)
+        if model_annotations is None:  # pragma: no cover
+            model_annotations = get_type_hints(
+                annotation, globalns=globalns, localns=localns, include_extras=include_extras
+            )
         typevar_map = {p: p for p in annotation.__pydantic_generic_metadata__["parameters"]}
     else:
-        type_hints = get_type_hints(origin, globalns=globalns, localns=localns, include_extras=include_extras)
+        if model_annotations is None:
+            model_annotations = get_type_hints(
+                origin, globalns=globalns, localns=localns, include_extras=include_extras
+            )
         args = annotation.__pydantic_generic_metadata__["args"]
         parameters = origin.__pydantic_generic_metadata__["parameters"]
         typevar_map = dict(zip(parameters, args))
 
-    return {n: _substitute_typevars(type_, typevar_map) for n, type_ in type_hints.items()}
+    return {n: _substitute_typevars(type_, typevar_map) for n, type_ in model_annotations.items()}
 
 
-def pydantic_get_unwrapped_annotation_and_type_hints(annotation: Any) -> tuple[Any, dict[str, Any]]:
+@deprecated(version="2.6.2")
+def pydantic_get_unwrapped_annotation_and_type_hints(annotation: Any) -> tuple[Any, dict[str, Any]]:  # pragma:  pver
     """Get the unwrapped annotation and the type hints after resolving generics.
 
     Args:
@@ -168,3 +180,51 @@ def is_pydantic_2_model(
 
 def is_pydantic_undefined(value: Any) -> bool:
     return any(v is value for v in PYDANTIC_UNDEFINED_SENTINELS)
+
+
+def create_field_definitions_for_computed_fields(
+    model: type[pydantic_v1.BaseModel | pydantic_v2.BaseModel],  # pyright: ignore
+    prefer_alias: bool,
+) -> dict[str, FieldDefinition]:
+    """Create field definitions for computed fields.
+
+    Args:
+        model: A pydantic model.
+        prefer_alias: Whether to prefer the alias or the name of the field.
+
+    Returns:
+        A dictionary containing the field definitions for the computed fields.
+    """
+    pydantic_decorators = getattr(model, "__pydantic_decorators__", None)
+    if pydantic_decorators is None:
+        return {}
+
+    def get_name(k: str, dec: Any) -> str:
+        if not dec.info.alias:
+            return k
+        return dec.info.alias if prefer_alias else k  # type: ignore[no-any-return]
+
+    return {
+        (name := get_name(k, dec)): FieldDefinition.from_annotation(
+            Annotated[
+                dec.info.return_type,
+                KwargDefinition(title=dec.info.title, description=dec.info.description, read_only=True),
+            ],
+            name=name,
+        )
+        for k, dec in pydantic_decorators.computed_fields.items()
+    }
+
+
+def is_pydantic_v2(module: ModuleType) -> bool:
+    """Determine if the given module is pydantic v2.
+
+    Given a module we expect to be a pydantic version, determine if it is pydantic v2.
+
+    Args:
+        module: A module.
+
+    Returns:
+        True if the module is pydantic v2, otherwise False.
+    """
+    return bool(module.__version__.startswith("2."))

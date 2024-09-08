@@ -69,7 +69,7 @@ async def test_request_factory_create_with_data(data_cls: DataContainerType) -> 
     request = RequestFactory()._create_request_with_data(
         HttpMethod.POST,
         "/",
-        data=data_cls(**person_data),  # type: ignore
+        data=data_cls(**person_data),  # type: ignore[operator]
     )
     body = await request.body()
     assert json.loads(body) == person_data
@@ -119,7 +119,7 @@ def test_request_factory_create_with_default_params() -> None:
     assert isinstance(request.app, Litestar)
     assert request.url == request.base_url == _DEFAULT_REQUEST_FACTORY_URL
     assert request.method == HttpMethod.GET
-    assert request.state.keys() == {"__litestar__"}
+    assert request.state.keys() == {"_ls_connection_state"}
     assert not request.query_params
     assert not request.path_params
     assert request.route_handler
@@ -137,8 +137,7 @@ def test_request_factory_create_with_params() -> None:
         pass
 
     @get("/path")
-    def handler() -> None:
-        ...
+    def handler() -> None: ...
 
     app = Litestar(route_handlers=[])
     server = "litestar.org"

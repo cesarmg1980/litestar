@@ -51,18 +51,17 @@ async def form_multi_item_handler(request: Request) -> DefaultDict[str, list]:
     data = await request.form()
     output = defaultdict(list)
     for key, value in data.multi_items():
-        for v in value:
-            if isinstance(v, UploadFile):
-                content = await v.read()
-                output[key].append(
-                    {
-                        "filename": v.filename,
-                        "content": content.decode(),
-                        "content_type": v.content_type,
-                    }
-                )
-            else:
-                output[key].append(v)
+        if isinstance(value, UploadFile):
+            content = await value.read()
+            output[key].append(
+                {
+                    "filename": value.filename,
+                    "content": content.decode(),
+                    "content_type": value.content_type,
+                }
+            )
+        else:
+            output[key].append(value)
     return output
 
 
@@ -90,7 +89,7 @@ def test_request_body_multi_part(t_type: type) -> None:
     data = asdict(Form(name="Moishe Zuchmir", age=30, programmer=True, value="100"))
 
     @post(path=test_path, signature_namespace={"t_type": t_type})
-    def test_method(data: Annotated[t_type, Body(media_type=RequestEncodingType.MULTI_PART)]) -> None:  # type: ignore
+    def test_method(data: Annotated[t_type, Body(media_type=RequestEncodingType.MULTI_PART)]) -> None:  # type: ignore[valid-type]
         assert data
 
     with create_test_client(test_method) as client:
@@ -394,6 +393,55 @@ def test_image_upload() -> None:
         assert response.status_code == HTTP_201_CREATED
 
 
+@pytest.mark.parametrize("optional", [True, False])
+@pytest.mark.parametrize("file_count", (1, 2))
+def test_upload_multiple_files(file_count: int, optional: bool) -> None:
+    annotation = List[UploadFile]
+    if optional:
+        annotation = Optional[annotation]  # type: ignore[misc, assignment]
+
+    @post("/", signature_namespace={"annotation": annotation})
+    async def handler(data: annotation = Body(media_type=RequestEncodingType.MULTI_PART)) -> None:  # pyright: ignore[reportGeneralTypeIssues]
+        assert len(data) == file_count
+
+        for file in data:
+            assert await file.read() == b"1"
+
+    with create_test_client([handler]) as client:
+        files_to_upload = [("file", b"1") for _ in range(file_count)]
+        response = client.post("/", files=files_to_upload)
+
+        assert response.status_code == HTTP_201_CREATED
+
+
+@dataclass
+class Files:
+    file_list: List[UploadFile]
+
+
+# https://github.com/litestar-org/litestar/issues/3407
+@dataclass
+class OptionalFiles:
+    file_list: Optional[List[UploadFile]]
+
+
+@pytest.mark.parametrize("file_model", (Files, OptionalFiles))
+@pytest.mark.parametrize("file_count", (1, 2))
+def test_upload_multiple_files_in_model(file_count: int, file_model: type[Files | OptionalFiles]) -> None:
+    @post("/", signature_namespace={"file_model": file_model})
+    async def handler(data: file_model = Body(media_type=RequestEncodingType.MULTI_PART)) -> None:  # type: ignore[valid-type]
+        assert len(data.file_list) == file_count  # type: ignore[attr-defined]
+
+        for file in data.file_list:  # type: ignore[attr-defined]
+            assert await file.read() == b"1"
+
+    with create_test_client([handler]) as client:
+        files_to_upload = [("file_list", b"1") for _ in range(file_count)]
+        response = client.post("/", files=files_to_upload)
+
+        assert response.status_code == HTTP_201_CREATED
+
+
 def test_optional_formdata() -> None:
     @post("/", signature_types=[UploadFile])
     async def hello_world(data: Optional[UploadFile] = Body(media_type=RequestEncodingType.MULTI_PART)) -> None:
@@ -428,7 +476,7 @@ def test_multipart_form_part_limit_body_param_precedence() -> None:
 
     @post("/", signature_types=[UploadFile])
     async def hello_world(
-        data: List[UploadFile] = Body(media_type=RequestEncodingType.MULTI_PART, multipart_form_part_limit=route_limit)
+        data: List[UploadFile] = Body(media_type=RequestEncodingType.MULTI_PART, multipart_form_part_limit=route_limit),
     ) -> None:
         assert len(data) == route_limit
 

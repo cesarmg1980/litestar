@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional, Union
+from typing import TYPE_CHECKING, Callable, List, Optional, Union
 
 import pytest
 from pytest import FixtureRequest
@@ -18,7 +18,7 @@ from litestar.types.asgi_types import HTTPResponseBodyEvent, HTTPResponseStartEv
 from litestar.utils.dataclass import simple_asdict
 
 if TYPE_CHECKING:
-    from litestar.types.asgi_types import RawHeaders, RawHeadersList
+    from litestar.types.asgi_types import RawHeaders, RawHeadersList, Scope
 
 
 @pytest.fixture
@@ -36,7 +36,7 @@ def test_header_container_requires_header_key_being_defined() -> None:
         def _get_header_value(self) -> str:
             return ""
 
-        def from_header(self, header_value: str) -> "Header":  # type: ignore
+        def from_header(self, header_value: str) -> "Header":  # type: ignore[explicit-override, override]
             return self
 
     with pytest.raises(ImproperlyConfiguredException):
@@ -74,10 +74,8 @@ def test_headers_from_raw_tuple() -> None:
     assert headers.getall("foo") == ["bar", "baz"]
 
 
-def test_headers_from_scope() -> None:
-    headers = Headers.from_scope(
-        HTTPResponseStartEvent(type="http.response.start", status=200, headers=[(b"foo", b"bar"), (b"buzz", b"bup")])
-    )
+def test_headers_from_scope(create_scope: "Callable[..., Scope]") -> None:
+    headers = Headers.from_scope(create_scope(headers=[(b"foo", b"bar"), (b"buzz", b"bup")]))
     assert headers["foo"] == "bar"
     assert headers["buzz"] == "bup"
 
@@ -298,7 +296,7 @@ def test_cache_control_header_prevent_storing() -> None:
 def test_cache_control_header_unsupported_type_annotation() -> None:
     @dataclass
     class InvalidCacheControlHeader(CacheControlHeader):
-        unsupported_type: Union[int, str] = "foo"
+        foo_field: Union[int, str] = "foo"
 
     with pytest.raises(ImproperlyConfiguredException):
         InvalidCacheControlHeader.from_header("unsupported_type")

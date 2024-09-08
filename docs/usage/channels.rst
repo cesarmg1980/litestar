@@ -413,6 +413,17 @@ implemented are:
     when history is needed
 
 
+:class:`AsyncPgChannelsBackend <.asyncpg.AsyncPgChannelsBackend>`
+    A postgres backend using the
+    `asyncpg <https://magicstack.github.io/asyncpg/current/>`_ driver
+
+
+:class:`PsycoPgChannelsBackend <.psycopg.PsycoPgChannelsBackend>`
+    A postgres backend using the `psycopg3 <https://www.psycopg.org/psycopg3/docs/>`_
+    async driver
+
+
+
 
 Integrating with websocket handlers
 -----------------------------------
@@ -427,7 +438,7 @@ route handlers.
 
 .. literalinclude:: /examples/channels/create_route_handlers.py
     :language: python
-    :caption: Setting ``create_route_handlers=True`` will create route handlers for all ``channels``
+    :caption: Setting ``create_ws_route_handlers=True`` will create route handlers for all ``channels``
 
 
 

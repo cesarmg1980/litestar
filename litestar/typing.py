@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from collections import abc, deque
 from copy import deepcopy
 from dataclasses import dataclass, is_dataclass, replace
@@ -7,15 +8,24 @@ from inspect import Parameter, Signature
 from typing import Any, AnyStr, Callable, Collection, ForwardRef, Literal, Mapping, Protocol, Sequence, TypeVar, cast
 
 from msgspec import UnsetType
-from typing_extensions import NotRequired, Required, Self, get_args, get_origin, get_type_hints, is_typeddict
+from typing_extensions import (
+    NewType,
+    NotRequired,
+    Required,
+    Self,
+    TypeAliasType,
+    get_args,
+    get_origin,
+    get_type_hints,
+    is_typeddict,
+)
 
-from litestar.exceptions import ImproperlyConfiguredException
+from litestar.exceptions import ImproperlyConfiguredException, LitestarWarning
 from litestar.openapi.spec import Example
 from litestar.params import BodyKwarg, DependencyKwarg, KwargDefinition, ParameterKwarg
 from litestar.types import Empty
 from litestar.types.builtin_types import NoneType, UnionTypes
 from litestar.utils.predicates import (
-    is_annotated_type,
     is_any,
     is_class_and_subclass,
     is_generic,
@@ -38,12 +48,10 @@ T = TypeVar("T", bound=KwargDefinition)
 
 class _KwargMetaExtractor(Protocol):
     @staticmethod
-    def matches(annotation: Any, name: str | None, default: Any) -> bool:
-        ...
+    def matches(annotation: Any, name: str | None, default: Any) -> bool: ...
 
     @staticmethod
-    def extract(annotation: Any, default: Any) -> Any:
-        ...
+    def extract(annotation: Any, default: Any) -> Any: ...
 
 
 _KWARG_META_EXTRACTORS: set[_KwargMetaExtractor] = set()
@@ -83,9 +91,10 @@ def _parse_metadata(value: Any, is_sequence_container: bool, extra: dict[str, An
         **cast("dict[str, Any]", extra or getattr(value, "extra", None) or {}),
         **(getattr(value, "json_schema_extra", None) or {}),
     }
+    example_list: list[Any] | None
     if example := extra.pop("example", None):
         example_list = [Example(value=example)]
-    elif examples := getattr(value, "examples", None):
+    elif examples := (extra.pop("examples", None) or getattr(value, "examples", None)):
         example_list = [Example(value=example) for example in cast("list[str]", examples)]
     else:
         example_list = None
@@ -140,13 +149,6 @@ def _traverse_metadata(
                     metadata=cast("Sequence[Any]", value), is_sequence_container=is_sequence_container, extra=extra
                 )
             )
-        elif is_annotated_type(value) and (type_args := [v for v in get_args(value) if v is not None]):
-            # annotated values can be nested inside other annotated values
-            # this behaviour is buggy in python 3.8, hence we need to guard here.
-            if len(type_args) > 1:
-                constraints.update(
-                    _traverse_metadata(metadata=type_args[1:], is_sequence_container=is_sequence_container, extra=extra)
-                )
         elif unpacked_predicate := _unpack_predicate(value):
             constraints.update(unpacked_predicate)
         else:
@@ -302,7 +304,12 @@ class FieldDefinition:
     def is_simple_type(self) -> bool:
         """Check if the field type is a singleton value (e.g. int, str etc.)."""
         return not (
-            self.is_generic or self.is_optional or self.is_union or self.is_mapping or self.is_non_string_iterable
+            self.is_generic
+            or self.is_optional
+            or self.is_union
+            or self.is_mapping
+            or self.is_non_string_iterable
+            or self.is_new_type
         )
 
     @property
@@ -353,6 +360,15 @@ class FieldDefinition:
     def is_tuple(self) -> bool:
         """Whether the annotation is a ``tuple`` or not."""
         return self.is_subclass_of(tuple)
+
+    @property
+    def is_new_type(self) -> bool:
+        return isinstance(self.annotation, NewType)
+
+    @property
+    def is_type_alias_type(self) -> bool:
+        """Whether the annotation is a ``TypeAliasType``"""
+        return isinstance(self.annotation, TypeAliasType)
 
     @property
     def is_type_var(self) -> bool:
@@ -500,13 +516,30 @@ class FieldDefinition:
         if not kwargs.get("kwarg_definition"):
             if isinstance(kwargs.get("default"), (KwargDefinition, DependencyKwarg)):
                 kwargs["kwarg_definition"] = kwargs.pop("default")
-            elif any(isinstance(v, (KwargDefinition, DependencyKwarg)) for v in metadata):
-                kwargs["kwarg_definition"] = next(  # pragma: no cover
-                    # see https://github.com/nedbat/coveragepy/issues/475
-                    v
-                    for v in metadata
-                    if isinstance(v, (KwargDefinition, DependencyKwarg))
-                )
+            elif kwarg_definition := next(
+                (v for v in metadata if isinstance(v, (KwargDefinition, DependencyKwarg))), None
+            ):
+                kwargs["kwarg_definition"] = kwarg_definition
+
+                if kwarg_definition.default is not Empty:
+                    warnings.warn(
+                        f"Deprecated default value specification for annotation '{annotation}'. Setting defaults "
+                        f"inside 'typing.Annotated' is discouraged and support for this will be removed in a future "
+                        f"version. Defaults should be set with regular parameter default values. Use "
+                        "'param: Annotated[<type>, Parameter(...)] = <default>' instead of "
+                        "'param: Annotated[<type>, Parameter(..., default=<default>)].",
+                        category=DeprecationWarning,
+                        stacklevel=2,
+                    )
+                    if kwargs.get("default", Empty) is not Empty and kwarg_definition.default != kwargs["default"]:
+                        warnings.warn(
+                            f"Ambiguous default values for annotation '{annotation}'. The default value "
+                            f"'{kwarg_definition.default!r}' set inside the parameter annotation differs from the "
+                            f"parameter default value '{kwargs['default']!r}'",
+                            category=LitestarWarning,
+                            stacklevel=2,
+                        )
+
                 metadata = tuple(v for v in metadata if not isinstance(v, (KwargDefinition, DependencyKwarg)))
             elif (extra := kwargs.get("extra", {})) and "kwarg_definition" in extra:
                 kwargs["kwarg_definition"] = extra.pop("kwarg_definition")

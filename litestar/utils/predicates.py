@@ -34,8 +34,8 @@ from typing_extensions import (
 )
 
 from litestar.constants import UNDEFINED_SENTINELS
-from litestar.types import Empty
 from litestar.types.builtin_types import NoneType, UnionTypes
+from litestar.utils.deprecation import warn_deprecation
 from litestar.utils.helpers import unwrap_partial
 from litestar.utils.typing import get_origin_or_inner_type
 
@@ -43,16 +43,11 @@ if TYPE_CHECKING:
     from litestar.types.callable_types import AnyGenerator
     from litestar.types.protocols import DataclassProtocol
 
-try:
-    import attrs
-except ImportError:
-    attrs = Empty  # type: ignore
 
 __all__ = (
     "is_annotated_type",
     "is_any",
     "is_async_callable",
-    "is_attrs_class",
     "is_class_and_subclass",
     "is_class_var",
     "is_dataclass_class",
@@ -62,7 +57,6 @@ __all__ = (
     "is_non_string_iterable",
     "is_non_string_sequence",
     "is_optional_union",
-    "is_sync_or_async_generator",
     "is_undefined_sentinel",
     "is_union",
 )
@@ -148,7 +142,7 @@ def is_generic(annotation: Any) -> bool:
     Returns:
         True if the annotation is a subclass of :data:`Generic <typing.Generic>` otherwise ``False``.
     """
-    return is_class_and_subclass(annotation, Generic)  # type: ignore
+    return is_class_and_subclass(annotation, Generic)  # type: ignore[arg-type]
 
 
 def is_mapping(annotation: Any) -> TypeGuard[Mapping[Any, Any]]:
@@ -200,7 +194,7 @@ def is_non_string_sequence(annotation: Any) -> TypeGuard[Sequence[Any]]:
     try:
         return not issubclass(origin or annotation, (str, bytes)) and issubclass(
             origin or annotation,
-            (  # type: ignore
+            (  # type: ignore[arg-type]
                 Tuple,
                 List,
                 Set,
@@ -262,18 +256,6 @@ def is_optional_union(annotation: Any) -> TypeGuard[Any | None]:
     )
 
 
-def is_attrs_class(annotation: Any) -> TypeGuard[type[attrs.AttrsInstance]]:  # pyright: ignore
-    """Given a type annotation determine if the annotation is a class that includes an attrs attribute.
-
-    Args:
-        annotation: A type.
-
-    Returns:
-        A typeguard determining whether the type is an attrs class.
-    """
-    return attrs.has(annotation) if attrs is not Empty else False  # type: ignore[comparison-overlap]
-
-
 def is_class_var(annotation: Any) -> bool:
     """Check if the given annotation is a ClassVar.
 
@@ -287,7 +269,7 @@ def is_class_var(annotation: Any) -> bool:
     return annotation is ClassVar
 
 
-def is_sync_or_async_generator(obj: Any) -> TypeGuard[AnyGenerator]:
+def _is_sync_or_async_generator(obj: Any) -> TypeGuard[AnyGenerator]:
     """Check if the given annotation is a sync or async generator.
 
     Args:
@@ -321,3 +303,19 @@ def is_undefined_sentinel(value: Any) -> bool:
         A boolean.
     """
     return any(v is value for v in UNDEFINED_SENTINELS)
+
+
+_deprecated_names = {"is_sync_or_async_generator": _is_sync_or_async_generator}
+
+
+def __getattr__(name: str) -> Any:
+    if name in _deprecated_names:
+        warn_deprecation(
+            deprecated_name=f"litestar.utils.scope.{name}",
+            version="2.4",
+            kind="import",
+            removal_in="3.0",
+            info=f"'litestar.utils.predicates.{name}' is deprecated.",
+        )
+        return globals()["_deprecated_names"][name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")  # pragma: no cover

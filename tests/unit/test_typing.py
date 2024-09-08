@@ -7,9 +7,11 @@ from typing import Any, ForwardRef, Generic, List, Optional, Tuple, TypeVar, Uni
 import annotated_types
 import msgspec
 import pytest
-from typing_extensions import Annotated, NotRequired, Required, TypedDict, get_type_hints
+from typing_extensions import Annotated, NotRequired, Required, TypeAliasType, TypedDict, get_type_hints
 
-from litestar.params import DependencyKwarg, KwargDefinition, ParameterKwarg
+from litestar import get
+from litestar.exceptions import LitestarWarning
+from litestar.params import DependencyKwarg, KwargDefinition, Parameter, ParameterKwarg
 from litestar.typing import FieldDefinition, _unpack_predicate
 
 from .test_utils.test_signature import T, _check_field_definition, field_definition_int, test_type_hints
@@ -221,16 +223,13 @@ def test_field_definition_is_optional_predicate() -> None:
 def test_field_definition_is_dataclass_predicate() -> None:
     """Test FieldDefinition.is_dataclass."""
 
-    class NormalClass:
-        ...
+    class NormalClass: ...
 
     @dataclass
-    class NormalDataclass:
-        ...
+    class NormalDataclass: ...
 
     @dataclass
-    class GenericDataclass(Generic[T]):
-        ...
+    class GenericDataclass(Generic[T]): ...
 
     assert FieldDefinition.from_annotation(NormalDataclass).is_dataclass_type is True
     assert FieldDefinition.from_annotation(GenericDataclass).is_dataclass_type is True
@@ -242,19 +241,16 @@ def test_field_definition_is_dataclass_predicate() -> None:
 def test_field_definition_is_typeddict_predicate() -> None:
     """Test FieldDefinition.is_typeddict."""
 
-    class NormalClass:
-        ...
+    class NormalClass: ...
 
-    class TypedDictClass(TypedDict):
-        ...
+    class TypedDictClass(TypedDict): ...
 
     assert FieldDefinition.from_annotation(NormalClass).is_typeddict_type is False
     assert FieldDefinition.from_annotation(TypedDictClass).is_typeddict_type is True
 
     if sys.version_info >= (3, 11):
 
-        class GenericTypedDictClass(TypedDict, Generic[T]):
-            ...
+        class GenericTypedDictClass(TypedDict, Generic[T]): ...
 
         assert FieldDefinition.from_annotation(GenericTypedDictClass).is_typeddict_type is True
         assert FieldDefinition.from_annotation(GenericTypedDictClass[int]).is_typeddict_type is True
@@ -456,3 +452,41 @@ def test_field_definition_get_type_hints_dont_resolve_generics(
 )
 def test_unpack_predicate(predicate: Any, expected_meta: dict[str, Any]) -> None:
     assert _unpack_predicate(predicate) == expected_meta
+
+
+def test_warn_ambiguous_default_values() -> None:
+    with pytest.warns(LitestarWarning, match="Ambiguous default values"):
+        FieldDefinition.from_annotation(Annotated[int, Parameter(default=1)], default=2)
+
+
+def test_warn_defaults_inside_parameter_definition() -> None:
+    with pytest.warns(DeprecationWarning, match="Deprecated default value specification"):
+        FieldDefinition.from_annotation(Annotated[int, Parameter(default=1)], default=1)
+
+
+def test_warn_default_inside_kwarg_definition_and_default_empty() -> None:
+    with pytest.warns() as warnings:
+
+        @get(sync_to_thread=False)
+        def handler(foo: Annotated[int, Parameter(default=1)]) -> None:
+            pass
+
+        _ = handler.parsed_fn_signature
+
+    (record,) = warnings
+    assert record.category == DeprecationWarning
+    assert "Deprecated default value specification" in str(record.message)
+
+
+def test_is_type_alias_type() -> None:
+    field_definition = FieldDefinition.from_annotation(TypeAliasType("IntAlias", int))  # pyright: ignore
+    assert field_definition.is_type_alias_type
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="type keyword not available before 3.12")
+def test_unwrap_type_alias_type_keyword() -> None:
+    ctx: dict[str, Any] = {}
+    exec("type IntAlias = int", ctx, None)
+    annotation = ctx["IntAlias"]
+    field_definition = FieldDefinition.from_annotation(annotation)
+    assert field_definition.is_type_alias_type

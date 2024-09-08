@@ -152,4 +152,16 @@ def test_dependency_has_async_callable(dep: Any, exp: bool) -> None:
 
 def test_raises_when_dependency_is_not_callable() -> None:
     with pytest.raises(ImproperlyConfiguredException):
-        Provide(123)  # type: ignore
+        Provide(123)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("dep",),
+    [
+        (generator_func,),
+        (async_generator_func,),
+    ],
+)
+def test_raises_when_generator_dependency_is_cached(dep: Any) -> None:
+    with pytest.raises(ImproperlyConfiguredException):
+        Provide(dep, use_cache=True)
